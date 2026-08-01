@@ -110,12 +110,10 @@ def test_get_device_torch_device_passthrough():
 
 @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch is not installed")
 def test_get_device_tpu_unsupported_raises():
-    """Test requesting TPU/XLA when torch_xla is unavailable raises RuntimeError."""
+    """Test requesting TPU/XLA when torch_xla is unavailable falls back to CPU."""
     with patch.object(gpu_core, "_is_tpu_available", lambda: False):
-        with pytest.raises(
-            RuntimeError, match="torch_xla is not installed or available"
-        ):
-            gpu.get_device("tpu")
+        dev = gpu.get_device("tpu")
+        assert dev.type == "cpu"
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch is not installed")
@@ -132,7 +130,7 @@ def test_device_priority_order_cuda_mps_tpu_cpu(monkeypatch):
     # With TPU available and no CUDA/MPS, auto resolves to TPU
     with patch.object(torch.cuda, "is_available", lambda: False):
         with patch.object(torch.backends, "mps", MockMPS):
-            assert gpu.get_device("auto") == "xla:0"
+            assert str(gpu.get_device("auto")) == "xla:0"
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch is not installed")
@@ -367,21 +365,22 @@ def test_ransac_by_window_gpu_strict_and_non_strict():
 
 @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch is not installed")
 def test_gpu_core_accelerator_fallback_paths_unconditional():
-    """Test device fallback path branches in metrics and RANSAC unconditionally."""
+    """Test device fallback branches in metrics/RANSAC across accelerators."""
     data_raw = np.random.randn(4, 1000)
     data_filt = np.random.randn(4, 1000)
     interp_mats = [np.eye(4) for _ in range(3)]
 
-    # Pass torch.device("mps") object to trigger fallback branch on any CI runner
-    metrics = gpu.compute_window_correlation_metrics_gpu(
-        data_raw, data_filt, sfreq=250.0, device=torch.device("mps")
-    )
-    assert metrics["max_correlations"].shape[1] == 4
+    # Test fallback across all potential accelerators (MPS, CUDA, XPU, HPU, TPU)
+    for dev_spec in [torch.device("mps"), "cuda", "xpu", "hpu", "tpu"]:
+        metrics = gpu.compute_window_correlation_metrics_gpu(
+            data_raw, data_filt, sfreq=250.0, device=dev_spec
+        )
+        assert metrics["max_correlations"].shape[1] == 4
 
-    corrs = gpu.ransac_by_window_gpu(
-        data_raw, interp_mats, win_size=250, win_count=3, device=torch.device("mps")
-    )
-    assert corrs.shape == (3, 4)
+        corrs = gpu.ransac_by_window_gpu(
+            data_raw, interp_mats, win_size=250, win_count=3, device=dev_spec
+        )
+        assert corrs.shape == (3, 4)
 
 
 @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch is not installed")

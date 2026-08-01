@@ -116,13 +116,38 @@ def get_device(device="auto"):
         if _is_tpu_available():  # pragma: no cover
             dev = _get_tpu_device()  # pragma: no cover
         else:
-            raise RuntimeError(
-                "Requested TPU/XLA device, but torch_xla is not installed or available."
-            )
+            logger.warning("[PyPREP GPU] TPU/XLA is unavailable; falling back to CPU.")
+            dev = torch.device("cpu")
     elif isinstance(device, torch.device):
         dev = device
     else:
         dev = torch.device(device)
+
+    if not isinstance(dev, torch.device):
+        try:
+            dev = torch.device(dev)
+        except Exception:
+            pass
+
+    # Validate non-CPU requested accelerator is available in current environment.
+    # If user passes an unavailable device (e.g. mps on Linux or cuda without GPU),
+    # fall back to CPU before allocating tensors.
+    dev_type = getattr(dev, "type", str(dev)).lower()
+    if dev_type != "cpu":
+        backend_mod = getattr(torch, dev_type, getattr(torch.backends, dev_type, None))
+        is_valid = (
+            backend_mod is not None
+            and hasattr(backend_mod, "is_available")
+            and backend_mod.is_available()
+        )
+        if dev_type in ("tpu", "xla"):
+            is_valid = _is_tpu_available()
+
+        if not is_valid:
+            logger.warning(
+                f"[PyPREP GPU] Device '{dev}' is unavailable; falling back to CPU."
+            )
+            dev = torch.device("cpu")
 
     logger.debug(f"[PyPREP GPU] Device selected: {dev}")
     return dev
@@ -174,16 +199,9 @@ def _to_tensor(data, device, dtype=None):
         return data.to(device=device, dtype=dtype, non_blocking=True)
 
     np_dtype = np.float64 if dtype == torch.float64 else np.float32
-    try:
-        return torch.tensor(
-            np.ascontiguousarray(data, dtype=np_dtype), device=device, dtype=dtype
-        )
-    except (RuntimeError, AssertionError):
-        return torch.tensor(
-            np.ascontiguousarray(data, dtype=np_dtype),
-            device=torch.device("cpu"),
-            dtype=dtype,
-        )
+    return torch.tensor(
+        np.ascontiguousarray(data, dtype=np_dtype), device=device, dtype=dtype
+    )
 
 
 def _dtype_for_device(device):
@@ -440,14 +458,7 @@ def compute_window_correlation_metrics_gpu(
 
     # 4. Use gpu_corrs matrix for 98th percentile quantile across channels
     bmm_corrs = _to_tensor(gpu_corrs, dev, dtype=dtype)
-    try:
-        eye = torch.eye(n_chans, dtype=torch.bool, device=dev).unsqueeze(0)
-    except (RuntimeError, NotImplementedError, AssertionError):
-        eye = (
-            torch.eye(n_chans, dtype=torch.bool, device=torch.device("cpu"))
-            .unsqueeze(0)
-            .to(dev)
-        )
+    eye = torch.eye(n_chans, dtype=torch.bool, device=dev).unsqueeze(0)
     abs_bmm_corrs = torch.abs(bmm_corrs)
     abs_bmm_corrs.masked_fill_(eye, 0.0)
 
